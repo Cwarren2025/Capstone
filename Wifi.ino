@@ -7,33 +7,42 @@ extern "C" {
   #include "user_interface.h"
 }
 
+byte channel;
+
 const char* ap_ssid = "ConfigAP";
 const char* ap_password = "password123";
+unsigned long previousMillis = 0;
+const long interval = 10; // Interval at which to send beacons (milliseconds)
 
 std::vector<String> beacon_ssids = {"BeaconA", "Beacon2", "Beacon3", "Beacon4", "Beacon5","Beacon1", "Beacon2", "Beacon3", "Beacon4", "Beacon5"};
 
 ESP8266WebServer server(80);
 DNSServer dnsServer;
 
-uint8_t packet[128] = { 0x80, 0x00, 0x00, 0x00, 
-                        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 
-                        0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
-                        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 
-                        0xc0, 0x6c, 
-                        0x83, 0x51, 0xf7, 0x8f, 0x0f, 0x00, 0x00, 0x00, 
-                        0x64, 0x00, 
-                        0x01, 0x04, 
-                        0x00, 0x06, 0x72, 0x72, 0x72, 0x72, 0x72, 0x72,
+
+byte rnd;
+byte i;
+byte count;
+
+
+byte wifipkt[128] = { 0x80, 0x00, 0x00, 0x00, 
+                /*4*/   0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 
+                /*10*/  0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
+                /*16*/  0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 
+                /*22*/  0xc0, 0x6c, 
+                /*24*/  0x83, 0x51, 0xf7, 0x8f, 0x0f, 0x00, 0x00, 0x00, 
+                /*32*/  0x64, 0x00, 
+                /*34*/  0x01, 0x04, 
+                /* SSID */
+                /*36*/  0x00};
+
+byte pktsuffix[] = {
                         0x01, 0x08, 0x82, 0x84,
                         0x8b, 0x96, 0x24, 0x30, 0x48, 0x6c, 0x03, 0x01, 
-                        0x04};
-
-unsigned long previousMillis = 0;
-const long interval = 10; // Interval at which to send beacons (milliseconds)
+                        0x04 };                       
 
 void setup() {
   Serial.begin(115200);
-  
   WiFi.mode(WIFI_AP_STA);
   WiFi.softAP(ap_ssid, ap_password);
   
@@ -61,33 +70,6 @@ void loop() {
   }
 }
 
-void sendBeacons() {
-  for (const auto& ssid : beacon_ssids) {
-    uint8_t channel = random(1, 12);
-    wifi_set_channel(channel);
-
-    // Randomize MAC address
-    for (int i = 10; i < 16; i++) {
-      packet[i] = packet[i + 6] = random(256);
-    }
-
-    // Set SSID
-    int ssid_length = ssid.length();
-    packet[37] = ssid_length;
-    for (int i = 0; i < ssid_length; i++) {
-      packet[38 + i] = ssid[i];
-    }
-
-    // Set channel
-    packet[56] = channel;
-
-    // Send packet
-    wifi_send_pkt_freedom(packet, 57, 0);
-    wifi_send_pkt_freedom(packet, 57, 0);
-    wifi_send_pkt_freedom(packet, 57, 0);
-  }
-}
-
 void handleRoot() {
   String html = "<html><body>";
   html += "<h1>Configure Beacon SSIDs</h1>";
@@ -110,4 +92,35 @@ void handleUpdate() {
   }
   server.sendHeader("Location", "/");
   server.send(302, "text/plain", "Updated");
+}
+
+void sendBeacons(){
+    wifipkt[10] = wifipkt[16] = random(256);
+    wifipkt[11] = wifipkt[17] = random(256);
+    wifipkt[12] = wifipkt[18] = random(256);
+    wifipkt[13] = wifipkt[19] = random(256);
+    wifipkt[14] = wifipkt[20] = random(256);
+    wifipkt[15] = wifipkt[21] = random(256);
+
+    count=37;
+
+    rnd=random(beacon_ssids.size()-1);
+    
+    wifipkt[count++]=beacon_ssids[rnd].length();;
+    for (i=0; i<beacon_ssids[rnd].length(); i++) {
+      wifipkt[count++]=beacon_ssids[rnd][i];
+    }
+    
+    for (i=0; i<sizeof(pktsuffix); i++) {
+       wifipkt[count++]=pktsuffix[i];
+    }
+
+    channel = random(1,12); 
+    wifi_set_channel(channel);
+    wifipkt[count-1] = channel;
+    
+    wifi_send_pkt_freedom(wifipkt, count, 0);
+    wifi_send_pkt_freedom(wifipkt, count, 0);
+    wifi_send_pkt_freedom(wifipkt, count, 0);
+    delay(1);
 }
