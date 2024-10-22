@@ -1,0 +1,48 @@
+#include <ESP8266WiFi.h>
+#include <ESPAsyncWebServer.h>
+#include <ESPAsyncTCP.h>
+
+const char* ssid = "ESP8266-AP";  // The SSID of your Access Point
+const char* password = "123456789";  // The password for your Access Point
+
+AsyncWebServer server(80);
+AsyncWebSocket ws("/ws");
+
+void setup() {
+  Serial.begin(115200);
+
+  // Set up the Access Point
+  WiFi.softAP(ssid, password);
+  Serial.println("Access Point started");
+  
+  Serial.print("IP address: ");
+  Serial.println(WiFi.softAPIP());
+
+  // Serve HTML page
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+    request->send(200, "text/html", "<html><body><h1>WebSocket Example</h1><input type='text' id='msg'><button onclick='sendMessage()'>Send</button><div id='response'></div><script>var socket = new WebSocket('ws://' + location.hostname + '/ws'); socket.onmessage = function(event) { document.getElementById('response').innerHTML += '<br>' + event.data; }; function sendMessage() { var msg = document.getElementById('msg').value; socket.send(msg); document.getElementById('msg').value = ''; }</script></body></html>");
+  });
+
+  ws.onEvent(onWebSocketEvent);
+  server.addHandler(&ws);
+
+  server.begin();
+}
+
+void loop() {
+  // Nothing to do here; everything is handled asynchronously
+
+}
+
+void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len) {
+  if (type == WS_EVT_CONNECT) {
+    Serial.println("WebSocket client connected");
+  } else if (type == WS_EVT_DISCONNECT) {
+    Serial.println("WebSocket client disconnected");
+  } else if (type == WS_EVT_DATA) {
+    String message = String((char*)data).substring(0, len);
+    Serial.printf("Message received: %s\n", message.c_str());
+    // Echo the message back to all connected clients
+    ws.textAll(message);
+  }
+}
