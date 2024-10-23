@@ -1,0 +1,232 @@
+#include <ESP8266WiFi.h>
+#include <ESPAsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#include <DNSServer.h>
+#include <vector>
+#include <queue>
+
+extern "C" {
+  #include "user_interface.h"
+}
+
+const int STATUS_LED_PIN = 2;  
+const char* ap_ssid = "ConfigAP";      
+const char* ap_password = "password123";  
+const int CHANNEL = 1;  
+const int MAX_POWER = 20.5;  
+
+unsigned long previousMillis = 0;
+const long interval = 10;
+
+std::queue<String> messageQueue;
+const int MAX_MESSAGES = 10;
+
+AsyncWebServer server(80);
+AsyncWebSocket ws("/ws");
+DNSServer dnsServer;
+
+byte rnd;
+byte i;
+byte count;
+
+byte wifipkt[128] = { 0x80, 0x00, 0x00, 0x00, 
+                /*4*/   0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 
+                /*10*/  0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
+                /*16*/  0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 
+                /*22*/  0xc0, 0x6c, 
+                /*24*/  0x83, 0x51, 0xf7, 0x8f, 0x0f, 0x00, 0x00, 0x00, 
+                /*32*/  0x64, 0x00, 
+                /*34*/  0x01, 0x04, 
+                /*36*/  0x00};
+
+byte pktsuffix[] = {
+                    0x01, 0x08, 0x82, 0x84,
+                    0x8b, 0x96, 0x24, 0x30, 0x48, 0x6c, 0x03, 0x01, 
+                    0x04 };
+
+void onWsEvent(AsyncWebSocket * server, AsyncWebSocketClient * client, AwsEventType type, void * arg, uint8_t *data, size_t len) {
+  if(type == WS_EVT_CONNECT){
+    Serial.printf("WebSocket client #%u connected from %s\n", client->id(), client->remoteIP().toString().c_str());
+    std::queue<String> tempQueue = messageQueue;
+    while(!tempQueue.empty()) {
+      client->text(tempQueue.front());
+      tempQueue.pop();
+    }
+  } else if(type == WS_EVT_DISCONNECT){
+    Serial.printf("WebSocket client #%u disconnected\n", client->id());
+  } else if(type == WS_EVT_DATA){
+    String message = "";
+    for(size_t i=0; i < len; i++) {
+      message += (char) data[i];
+    }
+    
+    if(messageQueue.size() >= MAX_MESSAGES) {
+      messageQueue.pop();
+    }
+    messageQueue.push(message);
+    
+    ws.textAll(message);
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println("\n\nStarting WiFi Access Point...");
+  
+  pinMode(STATUS_LED_PIN, OUTPUT);
+  digitalWrite(STATUS_LED_PIN, HIGH);
+  
+  WiFi.disconnect(true);
+  delay(100);
+  WiFi.mode(WIFI_AP);
+  delay(100);
+  
+  if(WiFi.softAPConfig(IPAddress(192,168,4,1), IPAddress(192,168,4,1), IPAddress(255,255,255,0))) {
+    Serial.println("AP Config successful");
+  } else {
+    Serial.println("AP Config failed!");
+  }
+  
+  WiFi.setOutputPower(MAX_POWER);
+  
+  if(WiFi.softAP(ap_ssid, ap_password, CHANNEL, false, 8)) {
+    Serial.println("AP started successfully!");
+    digitalWrite(STATUS_LED_PIN, LOW);
+  } else {
+    Serial.println("AP failed to start!");
+    for(int i = 0; i < 10; i++) {
+      digitalWrite(STATUS_LED_PIN, !digitalRead(STATUS_LED_PIN));
+      delay(200);
+    }
+  }
+  
+  Serial.print("AP SSID: ");
+  Serial.println(ap_ssid);
+  Serial.print("AP Password: ");
+  Serial.println(ap_password);
+  Serial.print("AP IP address: ");
+  Serial.println(WiFi.softAPIP());
+  Serial.print("AP MAC address: ");
+  Serial.println(WiFi.softAPmacAddress());
+  Serial.print("Channel: ");
+  Serial.println(CHANNEL);
+  
+  dnsServer.start(53, "*", WiFi.softAPIP());
+  
+  ws.onEvent(onWsEvent);
+  server.addHandler(&ws);
+
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+    String html = ""
+    "<!DOCTYPE html>\n"
+    "<html>\n"
+    "<head>\n"
+    "  <title>ESP8266 Chat Room</title>\n"
+    "  <style>\n"
+    "    #chatBox { height: 300px; border: 1px solid #ccc; overflow-y: scroll; margin-bottom: 10px; padding: 10px; }\n"
+    "  </style>\n"
+    "</head>\n"
+    "<body>\n"
+    "  <h1>ESP8266 Chat Room</h1>\n"
+    "  <div id=\"chatBox\"></div>\n"
+    "  <input type=\"text\" id=\"messageInput\" placeholder=\"Type your message...\">\n"
+    "  <button onclick=\"sendMessage()\">Send</button>\n"
+    "  <script>\n"
+    "    var ws = new WebSocket('ws://' + window.location.hostname + '/ws');\n"
+    "    ws.onopen = function() {\n"
+    "      console.log('Connected to WebSocket server');\n"
+    "    };\n"
+    "    ws.onmessage = function(event) {\n"
+    "      var chatBox = document.getElementById('chatBox');\n"
+    "      chatBox.innerHTML += event.data + '<br>';\n"
+    "      chatBox.scrollTop = chatBox.scrollHeight;\n"
+    "    };\n"
+    "    function sendMessage() {\n"
+    "      var input = document.getElementById('messageInput');\n"
+    "      if(input.value) {\n"
+    "        ws.send(input.value);\n"
+    "        input.value = \"\";\n"
+    "      }\n"
+    "    }\n"
+    "    document.getElementById('messageInput').addEventListener('keypress', function(e) {\n"
+    "      if(e.key === 'Enter') {\n"
+    "        sendMessage();\n"
+    "      }\n"
+    "    });\n"
+    "  </script>\n"
+    "</body>\n"
+    "</html>\n";
+    request->send(200, "text/html", html);
+  });
+
+  server.begin();
+  wifi_promiscuous_enable(1);
+  
+  Serial.println("Web server and WebSocket started");
+}
+
+void loop() {
+  dnsServer.processNextRequest();
+  
+  static unsigned long lastStatus = 0;
+  if (millis() - lastStatus >= 5000) {
+    lastStatus = millis();
+    Serial.printf("Connected stations: %d\n", WiFi.softAPgetStationNum());
+    Serial.printf("AP status: %s\n", WiFi.softAPIP() != IPAddress(0,0,0,0) ? "Running" : "Failed");
+  }
+  
+  if (WiFi.softAPIP() == IPAddress(0,0,0,0)) {
+    digitalWrite(STATUS_LED_PIN, (millis() / 200) % 2 == 0 ? LOW : HIGH);
+  } else if (WiFi.softAPgetStationNum() == 0) {
+    digitalWrite(STATUS_LED_PIN, (millis() / 1000) % 2 == 0 ? LOW : HIGH);
+  } else {
+    digitalWrite(STATUS_LED_PIN, LOW);
+  }
+  
+  unsigned long currentMillis = millis();
+  if (currentMillis - previousMillis >= interval) {
+    previousMillis = currentMillis;
+    sendBeacons();
+  }
+}
+
+void sendBeacons() {
+    if (messageQueue.empty()) return;
+    
+    wifipkt[10] = wifipkt[16] = random(256);
+    wifipkt[11] = wifipkt[17] = random(256);
+    wifipkt[12] = wifipkt[18] = random(256);
+    wifipkt[13] = wifipkt[19] = random(256);
+    wifipkt[14] = wifipkt[20] = random(256);
+    wifipkt[15] = wifipkt[21] = random(256);
+
+    count = 37;
+    
+    std::queue<String> tempQueue = messageQueue;
+    rnd = random(tempQueue.size());
+    for(int i = 0; i < rnd; i++) {
+      tempQueue.pop();
+    }
+    String beaconMessage = tempQueue.front();
+    
+    if(beaconMessage.length() > 32) {
+      beaconMessage = beaconMessage.substring(0, 32);
+    }
+    
+    wifipkt[count++] = beaconMessage.length();
+    for (i = 0; i < beaconMessage.length(); i++) {
+      wifipkt[count++] = beaconMessage[i];
+    }
+    
+    for (i = 0; i < sizeof(pktsuffix); i++) {
+      wifipkt[count++] = pktsuffix[i];
+    }
+
+    wifi_set_channel(CHANNEL);
+    wifipkt[count-1] = CHANNEL;
+    
+    wifi_send_pkt_freedom(wifipkt, count, 0);
+    wifi_send_pkt_freedom(wifipkt, count, 0);
+    wifi_send_pkt_freedom(wifipkt, count, 0);
+    delay(1);
+}
